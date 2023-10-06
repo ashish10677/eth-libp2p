@@ -2,42 +2,45 @@ package main
 
 import (
 	"crypto/ecdsa"
-	"crypto/rand"
+	"encoding/hex"
 	"fmt"
-	"github.com/ethereum/go-ethereum/accounts/keystore"
-	crypto2 "github.com/ethereum/go-ethereum/crypto"
-	"github.com/libp2p/go-libp2p/core/crypto"
-	"github.com/libp2p/go-libp2p/core/peer"
 	"log"
 	"os"
+
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/ethereum/go-ethereum/accounts/keystore"
+	"github.com/ethereum/go-ethereum/crypto"
+	crypto2 "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"golang.org/x/crypto/sha3"
 )
 
-func generateEthCompatiblePrivateKey() ([]byte, error) {
-	privKey, _, err := crypto.GenerateSecp256k1Key(rand.Reader)
+const (
+	defaultPassword = "your-strong-password"
+	keystoreDir     = "./keystore"
+)
+
+func generatePrivateKey() ([]byte, *ecdsa.PrivateKey, error) {
+	privKey, err := crypto.GenerateKey()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	privateKeyBytes, err := privKey.Raw()
-	if err != nil {
-		return nil, err
-	}
+	privateKeyBytes := crypto.FromECDSA(privKey)
 	fmt.Printf("Private Key: 0x%x\n", privateKeyBytes)
-	return privateKeyBytes, nil
+	return privateKeyBytes, privKey, nil
 }
 
-func generateKeystore(privateKey *ecdsa.PrivateKey, password string) error {
-	dir := "./keystore"
-	err := os.MkdirAll(dir, 0700)
+func createKeystore(privateKey *ecdsa.PrivateKey, password string) error {
+	if password == "" {
+		password = defaultPassword
+	}
+
+	err := os.MkdirAll(keystoreDir, 0700)
 	if err != nil {
 		return err
 	}
 
-	// Set a passphrase for the keystore. This is what you'll use to unlock it later.
-	if password == "" {
-		password = "your-strong-password"
-	}
-
-	ks := keystore.NewKeyStore(dir, keystore.StandardScryptN, keystore.StandardScryptP)
+	ks := keystore.NewKeyStore(keystoreDir, keystore.StandardScryptN, keystore.StandardScryptP)
 	account, err := ks.ImportECDSA(privateKey, password)
 	if err != nil {
 		return err
@@ -46,34 +49,61 @@ func generateKeystore(privateKey *ecdsa.PrivateKey, password string) error {
 	return nil
 }
 
-func getIdFromPrivateKey(privateKeyBytes []byte) (peer.ID, error) {
-	key, err := crypto.UnmarshalSecp256k1PrivateKey(privateKeyBytes)
+func getPeerIDFromPrivateKey(privateKeyBytes []byte) (peer.ID, error) {
+	key, err := crypto2.UnmarshalSecp256k1PrivateKey(privateKeyBytes)
 	if err != nil {
 		return "", err
 	}
-	id, err := peer.IDFromPrivateKey(key)
+	return peer.IDFromPrivateKey(key)
+}
+
+func getPublicKeyFromCompressedKey(compressedKey []byte) (*btcec.PublicKey, error) {
+	return btcec.ParsePubKey(compressedKey)
+}
+
+func getAddressFromPublicKey(pubKey *btcec.PublicKey) []byte {
+	uncompressedKey := pubKey.SerializeUncompressed()
+	hash := sha3.NewLegacyKeccak256()
+	hash.Write(uncompressedKey[1:])
+	return hash.Sum(nil)[12:]
+}
+
+func getEthereumAddressFromPeerID(id peer.ID) (string, error) {
+	key, err := id.ExtractPublicKey()
 	if err != nil {
 		return "", err
 	}
-	return id, nil
+	rawPublicKey, err := key.Raw()
+	if err != nil {
+		return "", err
+	}
+	fmt.Printf("Length of public key: %d\n", len(rawPublicKey))
+	fmt.Printf("Compressed Public Key: 0x%x\n", rawPublicKey)
+	pubKey, err := getPublicKeyFromCompressedKey(rawPublicKey)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(getAddressFromPublicKey(pubKey)), nil
 }
 
 func main() {
-	privateKeyBytes, err := generateEthCompatiblePrivateKey()
+	privateKeyBytes, privateKey, err := generatePrivateKey()
 	if err != nil {
 		log.Fatalf("Error generating private key: %v", err)
 	}
-	privateKey, err := crypto2.ToECDSA(privateKeyBytes)
-	if err != nil {
-		log.Fatalf("Error converting private key to ECDSA: %v", err)
-	}
-	err = generateKeystore(privateKey, "")
+	err = createKeystore(privateKey, "")
 	if err != nil {
 		log.Fatalf("Error generating keystore: %v", err)
 	}
-	id, err := getIdFromPrivateKey(privateKeyBytes)
+
+	id, err := getPeerIDFromPrivateKey(privateKeyBytes)
 	if err != nil {
 		log.Fatalf("Error generating peer ID: %v", err)
 	}
 	fmt.Printf("Peer ID: %s\n", id)
+	address, err := getEthereumAddressFromPeerID(id)
+	if err != nil {
+		log.Fatalf("Error generating address: %v", err)
+	}
+	fmt.Printf("Address from ID: 0x%s\n", address)
 }
